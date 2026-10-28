@@ -317,7 +317,10 @@ unsafe extern "system" fn on_event(_: HWINEVENTHOOK, event: u32, window: HWND, o
             events.moving = false;
             events.changed = true;
         }
-        _ if object == OBJID_WINDOW.0 && child == 0 && is_top_level(window, event) => events.changed = true,
+        // A taskbar set to hide itself moves on every frame of its slide, and the list leaves it out anyway.
+        _ if object == OBJID_WINDOW.0 && child == 0 && is_top_level(window, event) && !IGNORED.contains(&class_name(window).as_str()) => {
+            events.changed = true
+        }
         _ => return,
     }
     EVENTS.set(events);
