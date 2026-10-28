@@ -189,19 +189,23 @@ impl Tracker {
                     corner_exponent: 2.0,
                 });
             }
-            blockers.push(frame);
+            // Alt+Tab's switcher sits in a clear window the size of the display; it doesn't hide the snow on windows.
+            if !(window.cover_only && fills_screen) {
+                blockers.push(frame);
+            }
         }
         surfaces
     }
 
     /// The full-screen window covering the display with these bounds, if any: the frontmost window on it,
-    /// looking past small always-on-top ones, fills it entirely. A maximized window counts only when the shell
-    /// also sees a full-screen app, since it fills the display too wherever the taskbar hides itself.
+    /// looking past small always-on-top ones and the shell's switchers and flyouts, fills it entirely. A maximized
+    /// window counts only when the shell also sees a full-screen app, since it fills the display too wherever the
+    /// taskbar hides itself.
     pub fn covering(&self, bounds: &RECT) -> Option<&str> {
         let foreground = unsafe { GetForegroundWindow() }.0 as isize;
         for window in &self.windows {
             let r = &window.rect;
-            if r.right <= bounds.left || r.left >= bounds.right || r.bottom <= bounds.top || r.top >= bounds.bottom {
+            if window.cover_only || r.right <= bounds.left || r.left >= bounds.right || r.bottom <= bounds.top || r.top >= bounds.bottom {
                 continue;
             }
             let fills = r.left <= bounds.left && r.top <= bounds.top && r.right >= bounds.right && r.bottom >= bounds.bottom;
