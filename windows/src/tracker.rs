@@ -2,13 +2,16 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUNDSMALL,
     DwmGetWindowAttribute,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
 use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
@@ -56,6 +59,9 @@ struct Events {
     moving: bool,
     started_moving: bool,
 }
+
+/// The shell's own sense that a full-screen app or presentation is in front, kept up to date by `watch_shell`.
+static SHELL_BUSY: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static EVENTS: Cell<Events> = const { Cell::new(Events { changed: true, moving: false, started_moving: false }) };
@@ -105,6 +111,7 @@ impl Tracker {
             })
             .filter(|hook| !hook.is_invalid())
             .collect();
+        watch_shell();
         Tracker {
             hooks,
             desktops: unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL) }.ok(),
@@ -129,8 +136,7 @@ impl Tracker {
         EVENTS.set(Events { changed: false, ..events });
         let began = Clock::now();
         self.windows = self.list();
-        self.busy = unsafe { SHQueryUserNotificationState() }
-            .is_ok_and(|state| matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE));
+        self.busy = SHELL_BUSY.load(Ordering::Relaxed);
         self.cost += Clock::now() - began;
         self.listings += 1;
         self.listed_at = now;
@@ -335,6 +341,23 @@ fn is_top_level(window: HWND, event: u32) -> bool {
         }
         GetAncestor(window, GA_ROOT) == window
     }
+}
+
+/// Asking the shell can stall for a fifth of a second while it is busy, sliding a hidden taskbar in or out for one,
+/// so it is asked on a thread of its own rather than between frames.
+fn watch_shell() {
+    static START: Once = Once::new();
+    START.call_once(|| {
+        let _ = std::thread::Builder::new().name("shell state".into()).spawn(|| {
+            let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            loop {
+                let busy = unsafe { SHQueryUserNotificationState() }
+                    .is_ok_and(|state| matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE));
+                SHELL_BUSY.store(busy, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    });
 }
 
 fn cloaked(window: HWND) -> bool {
